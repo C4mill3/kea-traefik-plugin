@@ -11,14 +11,14 @@ Example dynamic config in traefik file:
 
 ```yaml
 http:
-	middlewares:
-		kea-homelab:
-			plugin:
-				kea:
-					configPath: /run/secrets/kea-conf.yml
-					allowGroups:
-						- homelab
-						- All
+  middlewares:
+    kea-homelab:
+      plugin:
+        kea:
+          configPath: /run/secrets/kea-conf.yml
+          allowGroups:
+            - homelab
+            - All
 ```
 
 Example label config:
@@ -36,7 +36,7 @@ Settings:
   NetbirdUrl: https://api.netbird.io OR https://netbird.io/api
   Token: your-netbird-token
   RefreshSeconds: 300
-	LogLevel: Err # Optional: None, Err, or Info
+  LogLevel: Err # Optional: None, Err, or Info
 
 Groups: #Optional, create custom group and/or add ip to already existing netbird group
   homelab: 
