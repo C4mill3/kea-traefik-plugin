@@ -115,7 +115,7 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 func (g *NetbirdIPGuard) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if err := refreshIfNeeded(); err != nil {
 		errf("refreshing peer list failed: %v", err)
-		http.Error(rw, "failed to fetch peer list", http.StatusInternalServerError)
+		http.Error(rw, "Error, please contact admin", http.StatusInternalServerError)
 		return
 	}
 
