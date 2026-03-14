@@ -1,0 +1,12 @@
+displayName: Kea - NetBird Group
+
+type: middleware
+
+import: github.com/C4mill3/kea-traefik-plugin
+
+summary: Allow requests only from IPs belonging to specified NetBird groups.
+
+testData:
+  configPath: "/run/secrets/kea-netbird.yml"
+  allowGroups:
+    - "All"
