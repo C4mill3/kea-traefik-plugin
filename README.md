@@ -1,6 +1,9 @@
 # Kea Traefik Plugin
 An Identity aware middleware for traefik using netbird as a source
 
+Feel free to contrib
+
+
 Configuration uses only two middleware arguments:
 
 - `configPath`: path to a YAML file, typically mounted as a Docker secret
