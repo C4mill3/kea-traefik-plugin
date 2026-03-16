@@ -21,22 +21,32 @@ import (
 
 // Global shared state (set once from first instance)
 var (
-	globalMu         sync.RWMutex
-	globalCache      GroupPeers
-	globalGroups     groups
-	globalLastFetch  time.Time
-	globalConfigPath string
-	globalURL        string
-	globalToken      string
-	globalInterval   time.Duration
-	globalLogLevel   = logLevelErr
-	globalOnce       sync.Once
+	globalMu        sync.RWMutex
+	globalCache     GroupPeers
+	globalGroups    groups
+	globalLastFetch time.Time
+	globalConfigRef string
+	globalURL       string
+	globalToken     string
+	globalInterval  time.Duration
+	globalLogLevel  = logLevelErr
+	globalOnce      sync.Once
 )
 
 // Config is the Traefik plugin config (per-route, set via labels or dynamic config)
 type Config struct {
-	ConfigPath  string   `json:"configPath,omitempty"`
-	AllowGroups []string `json:"allowGroups,omitempty"`
+	ConfigPath   string        `json:"configPath,omitempty"`
+	InlineConfig *inlineConfig `json:"inlineConfig,omitempty"`
+	AllowGroups  []string      `json:"allowGroups,omitempty"`
+}
+
+// inlineConfig can be used directly in plugin config when no file secret is mounted.
+type inlineConfig struct {
+	NetbirdURL     string `json:"netbirdUrl,omitempty"`
+	Token          string `json:"token,omitempty"`
+	RefreshSeconds int    `json:"refreshSeconds,omitempty"`
+	LogLevel       string `json:"logLevel,omitempty"`
+	Groups         groups `json:"groups,omitempty"`
 }
 
 // fileConfig is the structure of the YAML secret file at ConfigPath
@@ -69,19 +79,14 @@ type NetbirdIPGuard struct {
 
 // New creates a new Kea middleware instance.
 func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.Handler, error) {
-	if cfg.ConfigPath == "" {
-		return nil, fmt.Errorf("configPath is required")
-	}
-
 	var initErr error
 	globalOnce.Do(func() { // Define global used by all instance
-		globalConfigPath = cfg.ConfigPath
-
-		shared, err := loadSharedConfig(cfg.ConfigPath)
+		shared, configRef, err := loadSharedFromPluginConfig(cfg)
 		if err != nil {
 			initErr = err
 			return
 		}
+		globalConfigRef = configRef
 
 		globalURL = shared.Settings.NetbirdURL
 		globalToken = shared.Settings.Token
@@ -97,8 +102,8 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 		}
 		globalLogLevel = parsedLogLevel
 		globalGroups = shared.Groups
-		infof("initialized: configPath=%s url=%s refreshInterval=%s localGroups=%d logLevel=%s",
-			globalConfigPath, globalURL, globalInterval, len(globalGroups), logLevelName(globalLogLevel))
+		infof("initialized: config=%s url=%s refreshInterval=%s localGroups=%d logLevel=%s",
+			globalConfigRef, globalURL, globalInterval, len(globalGroups), logLevelName(globalLogLevel))
 	})
 	if initErr != nil {
 		return nil, initErr
@@ -210,17 +215,52 @@ func loadSharedConfig(path string) (*fileConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing configPath %q: %w", path, err)
 	}
-	if cfg.Settings.NetbirdURL == "" {
-		return nil, fmt.Errorf("configPath %q: Settings.NetbirdUrl is required", path)
-	}
-	if cfg.Settings.Token == "" {
-		return nil, fmt.Errorf("configPath %q: Settings.Token is required", path)
-	}
-	if _, err := parseLogLevel(cfg.Settings.LogLevel); err != nil {
-		return nil, fmt.Errorf("configPath %q: %w", path, err)
+	if err := validateSharedConfig(&cfg, fmt.Sprintf("configPath %q", path)); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil
+}
+
+func loadSharedFromPluginConfig(cfg *Config) (*fileConfig, string, error) {
+	if cfg.InlineConfig != nil {
+		shared := &fileConfig{
+			Settings: settings{
+				NetbirdURL:     cfg.InlineConfig.NetbirdURL,
+				Token:          cfg.InlineConfig.Token,
+				RefreshSeconds: cfg.InlineConfig.RefreshSeconds,
+				LogLevel:       cfg.InlineConfig.LogLevel,
+			},
+			Groups: cfg.InlineConfig.Groups,
+		}
+		if err := validateSharedConfig(shared, "inlineConfig"); err != nil {
+			return nil, "", err
+		}
+		return shared, "inlineConfig", nil
+	}
+
+	if cfg.ConfigPath == "" {
+		return nil, "", fmt.Errorf("configPath or inlineConfig is required")
+	}
+
+	shared, err := loadSharedConfig(cfg.ConfigPath)
+	if err != nil {
+		return nil, "", err
+	}
+	return shared, fmt.Sprintf("configPath(%s)", cfg.ConfigPath), nil
+}
+
+func validateSharedConfig(cfg *fileConfig, source string) error {
+	if cfg.Settings.NetbirdURL == "" {
+		return fmt.Errorf("%s: NetbirdUrl is required", source)
+	}
+	if cfg.Settings.Token == "" {
+		return fmt.Errorf("%s: Token is required", source)
+	}
+	if _, err := parseLogLevel(cfg.Settings.LogLevel); err != nil {
+		return fmt.Errorf("%s: %w", source, err)
+	}
+	return nil
 }
 
 // extractIP returns the real client IP from the request.
