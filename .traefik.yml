@@ -7,6 +7,13 @@ import: github.com/C4mill3/kea-traefik-plugin
 summary: Allow requests only from IPs belonging to specified NetBird groups.
 
 testData:
-  configPath: "/run/secrets/kea-netbird.yml"
+  inlineConfig:
+    netbirdUrl: "https://api.netbird.io"
+    token: "test-token"
+    refreshSeconds: 300
+    logLevel: "Err"
+    groups:
+      All:
+        - "127.0.0.1/32"
   allowGroups:
     - "All"
