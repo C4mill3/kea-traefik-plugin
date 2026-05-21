@@ -38,6 +38,14 @@ type Config struct {
 	ConfigPath   string        `json:"configPath,omitempty"`
 	InlineConfig *inlineConfig `json:"inlineConfig,omitempty"`
 	AllowGroups  []string      `json:"allowGroups,omitempty"`
+	// AppURL is the URL/domain this route protects. When set, the route is
+	// recorded in a global registry so that routes with AccessHeaders enabled
+	// can list it among the URLs a client is allowed to access.
+	AppURL string `json:"appUrl,omitempty"`
+	// AccessHeaders, when true, makes this route inject a request header
+	// (accessHeaderName) listing every registered AppURL the caller's IP is
+	// allowed to access. Defaults to false so other routes are unaffected.
+	AccessHeaders bool `json:"accessHeaders,omitempty"`
 }
 
 // inlineConfig can be used directly in plugin config when no file secret is mounted.
@@ -65,6 +73,24 @@ type settings struct {
 // groups maps a group name to a list of CIDR ranges used as a local whitelist
 type groups map[string][]string
 
+// accessHeaderName is the request header injected into the backend by routes
+// with AccessHeaders enabled. It holds a comma-separated list of the AppURLs
+// the caller's IP is allowed to access.
+const accessHeaderName = "X-Kea-Allowed-Urls"
+
+// routeEntry records what a single kea-protected route grants.
+type routeEntry struct {
+	url         string
+	allowGroups []string
+}
+
+// Global registry of every route that declared an AppURL, keyed by middleware
+// instance name to deduplicate re-registrations on config reload.
+var (
+	globalRoutesMu sync.RWMutex
+	globalRoutes   = map[string]routeEntry{}
+)
+
 // CreateConfig returns a Config with sensible defaults.
 func CreateConfig() *Config {
 	return &Config{}
@@ -72,9 +98,10 @@ func CreateConfig() *Config {
 
 // NetbirdIPGuard is the middleware handler.
 type NetbirdIPGuard struct {
-	next        http.Handler
-	name        string
-	allowGroups []string
+	next          http.Handler
+	name          string
+	allowGroups   []string
+	accessHeaders bool
 }
 
 // New creates a new Kea middleware instance.
@@ -108,12 +135,19 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 	if initErr != nil {
 		return nil, initErr
 	}
-	infof("new instance: me=%s allowGroups=%v", name, cfg.AllowGroups)
+	if cfg.AppURL != "" {
+		globalRoutesMu.Lock()
+		globalRoutes[name] = routeEntry{url: cfg.AppURL, allowGroups: cfg.AllowGroups}
+		globalRoutesMu.Unlock()
+	}
+
+	infof("new instance: me=%s allowGroups=%v appUrl=%q accessHeaders=%t", name, cfg.AllowGroups, cfg.AppURL, cfg.AccessHeaders)
 
 	return &NetbirdIPGuard{
-		next:        next,
-		name:        name,
-		allowGroups: cfg.AllowGroups,
+		next:          next,
+		name:          name,
+		allowGroups:   cfg.AllowGroups,
+		accessHeaders: cfg.AccessHeaders,
 	}, nil
 }
 
@@ -133,34 +167,74 @@ func (g *NetbirdIPGuard) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	localGroups := globalGroups
 	globalMu.RUnlock()
 
+	// Inject the access header before forwarding. We always Set (overwrite) so a
+	// client cannot spoof the header by sending it themselves.
+	if g.accessHeaders {
+		urls := allowedURLsForIP(ip, srcIP, localGroups, localCache)
+		req.Header.Set(accessHeaderName, strings.Join(urls, ","))
+		infof("access header set ip=%s route=%s urls=%d", srcIP, g.name, len(urls))
+	}
+
 	for _, group := range g.allowGroups { // check for each group allowed on this route
-
-		// Check for local CIDR ranges from config file (Priority)
-		for _, cidr := range localGroups[group] {
-			_, ipNet, err := net.ParseCIDR(cidr)
-			if err != nil {
-				errf("invalid CIDR %q in group %q: %v", cidr, group, err)
-				continue
-			}
-			if ip != nil && ipNet.Contains(ip) {
-				infof("ALLOW ip=%s group=%s (local CIDR %s) route=%s", srcIP, group, cidr, g.name)
-				g.next.ServeHTTP(rw, req)
-				return
-			}
-		}
-
-		// 2. Check NetBird API peer list
-		for _, peerIP := range localCache[group] {
-			if peerIP == srcIP {
-				infof("ALLOW ip=%s group=%s (netbird) route=%s", srcIP, group, g.name)
-				g.next.ServeHTTP(rw, req)
-				return
-			}
+		if matched, src := ipInGroup(ip, srcIP, group, localGroups, localCache); matched {
+			infof("ALLOW ip=%s group=%s (%s) route=%s", srcIP, group, src, g.name)
+			g.next.ServeHTTP(rw, req)
+			return
 		}
 	}
 
 	infof("DENY ip=%s route=%s allowGroups=%v", srcIP, g.name, g.allowGroups)
 	http.Error(rw, "Forbidden", http.StatusForbidden)
+}
+
+// ipInGroup reports whether srcIP/ip belongs to group, checking local CIDR
+// ranges first (priority) then the NetBird peer cache. The returned string
+// names which source matched, for logging.
+func ipInGroup(ip net.IP, srcIP, group string, localGroups groups, localCache GroupPeers) (bool, string) {
+	for _, cidr := range localGroups[group] {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			errf("invalid CIDR %q in group %q: %v", cidr, group, err)
+			continue
+		}
+		if ip != nil && ipNet.Contains(ip) {
+			return true, "local CIDR " + cidr
+		}
+	}
+	for _, peerIP := range localCache[group] {
+		if peerIP == srcIP {
+			return true, "netbird"
+		}
+	}
+	return false, ""
+}
+
+// allowedURLsForIP returns, across all registered routes, the AppURLs whose
+// allowGroups admit srcIP/ip. Order follows registry iteration; duplicates are
+// removed.
+func allowedURLsForIP(ip net.IP, srcIP string, localGroups groups, localCache GroupPeers) []string {
+	globalRoutesMu.RLock()
+	entries := make([]routeEntry, 0, len(globalRoutes))
+	for _, e := range globalRoutes {
+		entries = append(entries, e)
+	}
+	globalRoutesMu.RUnlock()
+
+	var urls []string
+	seen := make(map[string]bool)
+	for _, e := range entries {
+		if e.url == "" || seen[e.url] {
+			continue
+		}
+		for _, group := range e.allowGroups {
+			if matched, _ := ipInGroup(ip, srcIP, group, localGroups, localCache); matched {
+				urls = append(urls, e.url)
+				seen[e.url] = true
+				break
+			}
+		}
+	}
+	return urls
 }
 
 func refreshIfNeeded() error {

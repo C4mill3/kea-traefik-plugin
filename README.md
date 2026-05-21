@@ -9,8 +9,34 @@ Configuration uses only two middleware arguments:
 - `configPath`: path to a YAML file, typically mounted as a Docker secret
 - `inlineConfig`: optional inline settings object (useful for catalog validation or environments without mounted secrets)
 - `allowGroups`: NetBird groups allowed for the route
+- `appUrl`: optional URL/domain this route protects. When set, the route is recorded in a global registry so routes with `accessHeaders` enabled can advertise it.
+- `accessHeaders`: optional bool (default `false`). When `true`, this route injects the `X-Kea-Allowed-Urls` request header into the backend, listing every registered `appUrl` the caller's IP is allowed to access (comma-separated).
 
 If both are set, `inlineConfig` has priority over `configPath`.
+
+## Access headers (identity-aware homepage)
+
+To let a backend (e.g. a homepage) render only the apps a visitor can reach,
+give every protected route an `appUrl`, and enable `accessHeaders` on the route
+serving the homepage:
+
+```yaml
+labels:
+  # each protected app declares its URL
+  - "traefik.http.middlewares.kea-sonarr.plugin.kea.configPath=/run/secrets/kea-conf.yml"
+  - "traefik.http.middlewares.kea-sonarr.plugin.kea.allowGroups=homelab"
+  - "traefik.http.middlewares.kea-sonarr.plugin.kea.appUrl=https://sonarr.example.com"
+
+  # the homepage route gets the computed list as a request header
+  - "traefik.http.middlewares.kea-home.plugin.kea.configPath=/run/secrets/kea-conf.yml"
+  - "traefik.http.middlewares.kea-home.plugin.kea.allowGroups=homelab, All"
+  - "traefik.http.middlewares.kea-home.plugin.kea.accessHeaders=true"
+```
+
+The homepage backend then reads `X-Kea-Allowed-Urls` (a comma-separated list of
+allowed `appUrl`s) off the incoming request and renders accordingly. The header
+is always overwritten on routes with `accessHeaders=true`, so a client cannot
+spoof it.
 
 
 Example dynamic config in traefik file:
