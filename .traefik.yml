@@ -17,3 +17,6 @@ testData:
         - "127.0.0.1/32"
   allowGroups:
     - "All"
+  # Optional: customize header names (defaults are Remote-User and Remote-Email)
+  userHeader: "X-Auth-User"
+  emailHeader: "X-Auth-Email"

@@ -1,8 +1,8 @@
 # Kea Traefik Plugin
+
 An Identity aware middleware for traefik using netbird as a source
 
 Feel free to contrib
-
 
 Configuration uses only two middleware arguments:
 
@@ -11,6 +11,8 @@ Configuration uses only two middleware arguments:
 - `allowGroups`: NetBird groups allowed for the route
 - `appUrl`: optional URL/domain this route protects. When set, the route is recorded in a global registry so routes with `accessHeaders` enabled can advertise it.
 - `accessHeaders`: optional bool (default `false`). When `true`, this route injects the `X-Kea-Allowed-Urls` request header into the backend, listing every registered `appUrl` the caller's IP is allowed to access (comma-separated).
+- `userHeader`: optional string (default `Remote-User`). The header name to set with the user's name.
+- `emailHeader`: optional string (default `Remote-Email`). The header name to set with the user's email.
 
 If both are set, `inlineConfig` has priority over `configPath`.
 
@@ -37,7 +39,6 @@ The homepage backend then reads `X-Kea-Allowed-Urls` (a comma-separated list of
 allowed `appUrl`s) off the incoming request and renders accordingly. The header
 is always overwritten on routes with `accessHeaders=true`, so a client cannot
 spoof it.
-
 
 Example dynamic config in traefik file:
 
@@ -76,6 +77,7 @@ http:
 ```
 
 Example label config:
+
 ```yaml
 labels:
   - "traefik.http.middlewares.kea-homelab.plugin.kea.configPath=/run/secrets/kea-conf.yml"
@@ -93,7 +95,7 @@ Settings:
   LogLevel: Err # Optional: None, Err, or Info
 
 Groups: #Optional, create custom group and/or add ip to already existing netbird group
-  homelab: 
-   - "192.168.1.0/24" #Allow request from local network
-   - "172.21.0.27/32"
+  homelab:
+    - "192.168.1.0/24" #Allow request from local network
+    - "172.21.0.27/32"
 ```
