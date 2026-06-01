@@ -395,6 +395,12 @@ func extractIP(req *http.Request) string {
 
 // addForwardedHeaders adds the forwarded headers when the IP is allowed
 func addForwardedHeaders(req *http.Request, srcIP string, localIPUserMap map[string]string, localUserCache map[string]UserInfo, userHeader string, emailHeader string) {
+
+	// Remove any incoming values so they can never reach the backend unverified.
+	req.Header.Del(userHeader)
+	req.Header.Del(emailHeader)
+
+	
 	// Get user ID for this IP
 	userID, exists := localIPUserMap[srcIP]
 	if !exists {
