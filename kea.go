@@ -23,6 +23,8 @@ import (
 var (
 	globalMu        sync.RWMutex
 	globalCache     GroupPeers
+	globalIPUserMap IPUserMap
+	globalUserCache UserIDMap
 	globalGroups    groups
 	globalLastFetch time.Time
 	globalConfigRef string
@@ -46,6 +48,12 @@ type Config struct {
 	// (accessHeaderName) listing every registered AppURL the caller's IP is
 	// allowed to access. Defaults to false so other routes are unaffected.
 	AccessHeaders bool `json:"accessHeaders,omitempty"`
+	// UserHeader specifies the header name for the authenticated user's name.
+	// Defaults to "Remote-User" if not set.
+	UserHeader string `json:"userHeader,omitempty"`
+	// EmailHeader specifies the header name for the authenticated user's email.
+	// Defaults to "Remote-Email" if not set.
+	EmailHeader string `json:"emailHeader,omitempty"`
 }
 
 // inlineConfig can be used directly in plugin config when no file secret is mounted.
@@ -102,6 +110,8 @@ type NetbirdIPGuard struct {
 	name          string
 	allowGroups   []string
 	accessHeaders bool
+	userHeader    string
+	emailHeader   string
 }
 
 // New creates a new Kea middleware instance.
@@ -129,6 +139,7 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 		}
 		globalLogLevel = parsedLogLevel
 		globalGroups = shared.Groups
+
 		infof("initialized: config=%s url=%s refreshInterval=%s localGroups=%d logLevel=%s",
 			globalConfigRef, globalURL, globalInterval, len(globalGroups), logLevelName(globalLogLevel))
 	})
@@ -141,13 +152,24 @@ func New(_ context.Context, next http.Handler, cfg *Config, name string) (http.H
 		globalRoutesMu.Unlock()
 	}
 
-	infof("new instance: me=%s allowGroups=%v appUrl=%q accessHeaders=%t", name, cfg.AllowGroups, cfg.AppURL, cfg.AccessHeaders)
+	userHeader := "Remote-User"
+	emailHeader := "Remote-Email"
+	if cfg.UserHeader != "" {
+		userHeader = cfg.UserHeader
+	}
+	if cfg.EmailHeader != "" {
+		emailHeader = cfg.EmailHeader
+	}
+
+	infof("new instance: me=%s allowGroups=%v appUrl=%q accessHeaders=%t userHeader=%q emailHeader=%q", name, cfg.AllowGroups, cfg.AppURL, cfg.AccessHeaders, userHeader, emailHeader)
 
 	return &NetbirdIPGuard{
 		next:          next,
 		name:          name,
 		allowGroups:   cfg.AllowGroups,
 		accessHeaders: cfg.AccessHeaders,
+		userHeader:    userHeader,
+		emailHeader:   emailHeader,
 	}, nil
 }
 
@@ -165,6 +187,8 @@ func (g *NetbirdIPGuard) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	globalMu.RLock()
 	localCache := globalCache
 	localGroups := globalGroups
+	localIPUserMap := globalIPUserMap
+	localUserCache := globalUserCache
 	globalMu.RUnlock()
 
 	// Inject the access header before forwarding. We always Set (overwrite) so a
@@ -178,6 +202,7 @@ func (g *NetbirdIPGuard) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	for _, group := range g.allowGroups { // check for each group allowed on this route
 		if matched, src := ipInGroup(ip, srcIP, group, localGroups, localCache); matched {
 			infof("ALLOW ip=%s group=%s (%s) route=%s", srcIP, group, src, g.name)
+			addForwardedHeaders(req, srcIP, localIPUserMap, localUserCache, g.userHeader, g.emailHeader)
 			g.next.ServeHTTP(rw, req)
 			return
 		}
@@ -255,14 +280,24 @@ func refreshIfNeeded() error {
 	}
 
 	infof("refreshing peer cache from %s", globalURL)
-	peers, err := FetchNetbirdPeerGroups(globalURL, globalToken)
+	peers, ipUserMap, err := FetchNetbirdPeerGroups(globalURL, globalToken)
 	if err != nil {
 		errf("fetching peers failed: %v", err)
 		return err
 	}
+
+	// Fetch user information
+	users, err := FetchNetbirdUsers(globalURL, globalToken)
+	if err != nil {
+		errf("fetching users failed: %v", err)
+		return err
+	}
+
 	globalCache = peers
+	globalIPUserMap = ipUserMap
+	globalUserCache = users
 	globalLastFetch = time.Now()
-	infof("peer cache refreshed: %d groups loaded", len(peers))
+	infof("peer cache refreshed: %d groups loaded, %d users", len(peers), len(users))
 	return nil
 }
 
@@ -356,4 +391,29 @@ func extractIP(req *http.Request) string {
 		return req.RemoteAddr
 	}
 	return host
+}
+
+// addForwardedHeaders adds the forwarded headers when the IP is allowed
+func addForwardedHeaders(req *http.Request, srcIP string, localIPUserMap map[string]string, localUserCache map[string]UserInfo, userHeader string, emailHeader string) {
+
+	// Remove any incoming values so they can never reach the backend unverified.
+	req.Header.Del(userHeader)
+	req.Header.Del(emailHeader)
+
+	
+	// Get user ID for this IP
+	userID, exists := localIPUserMap[srcIP]
+	if !exists {
+		return
+	}
+
+	// Get user information
+	user, userExists := localUserCache[userID]
+	if !userExists {
+		return
+	}
+
+	// Set headers with actual user information
+	req.Header.Set(userHeader, user.Name)
+	req.Header.Set(emailHeader, user.Email)
 }
